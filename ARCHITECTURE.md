@@ -375,8 +375,7 @@ WHERE a.enabled = true
 | `PUT` | `/api/customers/:id/features/:featureId` | Enable/disable feature for customer | SUPPORT_ENGINEER+ |
 | `DELETE` | `/api/customers/:id/features/:featureId` | Remove assignment (revert to global) | SUPPORT_ENGINEER+ |
 | `GET` | `/api/audit` | List audit log entries (filterable) | SRE+ |
-| `POST` | `/api/auth/login` | Exchange credentials for JWT + refresh token | Public |
-| `POST` | `/api/auth/refresh` | Exchange refresh token for new access + refresh token | Public (requires valid refresh token) |
+| `POST` | `/api/auth/login` | Exchange credentials for JWT | Public |
 | `GET` | `/api/auth/me` | Get current user info | Any authenticated |
 | `POST` | `/api/auth/api-keys` | Create a new API key | Any authenticated |
 | `GET` | `/api/auth/api-keys` | List current user's API keys | Any authenticated |
@@ -721,7 +720,7 @@ interface AuditDetails {
 
 ## 9. Authentication
 
-### Approach: API Key (CLI) + JWT (API)
+### Approach: JWT (CLI) + API Key (Automation)
 
 ```
 ┌─────────┐                          ┌─────────┐
@@ -729,31 +728,21 @@ interface AuditDetails {
 │         │ ────────────────────────▶ │         │
 │         │     email + password      │         │
 │         │ ◀──────────────────────── │         │
-│         │     { accessToken,        │         │
-│         │       refreshToken,       │         │
-│         │       user }              │         │
+│         │     { token, user }       │         │
 │         │                           │         │
-│         │  2. Store tokens in       │         │
+│         │  2. Store JWT in          │         │
 │         │     ~/.config/ffm/        │         │
 │         │                           │         │
 │         │  3. ffm feature list      │         │
 │         │     Authorization: Bearer  │         │
 │         │ ────────────────────────▶ │         │
 │         │ ◀──────────────────────── │         │
-│         │     (response or 401)     │         │
 │         │                           │         │
-│         │  4. On 401:               │         │
-│         │     POST /auth/refresh    │         │
-│         │     { refreshToken }      │         │
-│         │ ────────────────────────▶ │         │
-│         │ ◀──────────────────────── │         │
-│         │     { accessToken,        │         │
-│         │       refreshToken }      │         │
-│         │                           │         │
-│         │  5. Retry original req    │         │
-│         │     with new accessToken  │         │
-│         │ ────────────────────────▶ │         │
-│         │ ◀──────────────────────── │         │
+│         │  4. On 401 (expired):     │         │
+│         │     Print "Session        │         │
+│         │     expired. Run          │         │
+│         │     ffm login."           │         │
+│         │     and exit 1            │         │
 └─────────┘                          └─────────┘
 ```
 
@@ -761,8 +750,7 @@ interface AuditDetails {
 
 | Mechanism | Storage | Lifetime | Use Case |
 |---|---|---|---|
-| **JWT (access token)** | `~/.config/ffm/token` | 15 minutes | Short-lived API authentication |
-| **Refresh token** | `~/.config/ffm/refresh-token` (hashed in DB) | 30 days | Transparent token renewal for CLI |
+| **JWT (access token)** | `~/.config/ffm/token` | 24 hours | CLI authenticated sessions |
 | **API key** | Header `X-API-Key` | Configurable (default: no expiry) | CI/CD pipelines, automation scripts |
 
 ### API Key Model
@@ -780,8 +768,7 @@ A user can have multiple active keys. Revoking a key is non-destructive (sets `r
 
 | Decision | Why | Trade-offs |
 |---|---|---|
-| **JWT for CLI sessions** | Stateless, standard, easy to verify. Short-lived (15 min) limits exposure if token is compromised. | Token expires quickly. Mitigated by transparent refresh flow — CLI auto-renews on 401. |
-| **Refresh token with rotation** | Each refresh consumes the old token and issues a new one. Limits replay window if a refresh token is leaked. | Adds a `refresh_tokens` table and one extra endpoint. Standard trade-off for token security. |
+| **JWT for CLI sessions** | Stateless, standard, easy to verify. 24-hour expiry is pragmatic for an internal tool — long enough for a workday, short enough to limit exposure. | Token expires; user re-runs `ffm login`. Acceptable — no refresh token complexity. |
 | **Multiple API keys per user** | Different pipelines/scripts need independent credentials. Keys can be revoked individually without affecting other consumers. | More keys to manage. Worth it for operational safety. |
 | **API keys for automation** | CI/CD needs non-interactive auth. Keys can expire or be revoked independently. | Stored as bcrypt hashes. Shown once at creation — never recoverable. |
 | **No OAuth/OIDC** | Internal tool. Users are company employees. SSO integration is a future improvement. | No centralized identity. Acceptable for v1. |
@@ -789,18 +776,16 @@ A user can have multiple active keys. Revoking a key is non-destructive (sets `r
 
 ### Implementation Notes
 
-- `POST /api/auth/login` accepts `{ email, password }`, returns `{ accessToken, refreshToken, user }`.
-- `POST /api/auth/refresh` accepts `{ refreshToken }`, returns new `{ accessToken, refreshToken }` (rotation — old refresh token is consumed).
-- Access token JWT payload: `{ sub: userId, role: role, iat, exp }` (15-minute expiry).
-- Refresh token: cryptographically random 64-byte value, SHA-256 hashed before DB storage. Stored in `refresh_tokens` table with 30-day expiry.
+- `POST /api/auth/login` accepts `{ email, password }`, returns `{ token, user }`.
+- JWT payload: `{ sub: userId, role: role, iat, exp }` (24-hour expiry).
 - Auth middleware extracts user from JWT or API key, attaches to `req.user`.
 - API key flow: `X-API-Key` header → hash with bcrypt → lookup in `api_keys` where `revokedAt IS NULL AND (expiresAt IS NULL OR expiresAt > now())` → attach user to request.
 - If a valid API key is found, `lastUsedAt` is updated (fire-and-forget, not blocking the response).
-- CLI transparent refresh: on 401 response, CLI sends `POST /auth/refresh` with stored refresh token, updates stored tokens, retries original request. If refresh fails, CLI prints "Session expired. Run `ffm login` to re-authenticate." and exits.
+- CLI on 401: prints "Session expired. Run `ffm login` to re-authenticate." and exits with code 1.
 - `POST /api/auth/api-keys` — create a new API key (returns plaintext once).
 - `DELETE /api/auth/api-keys/:id` — revoke an API key (sets `revokedAt`).
 - `GET /api/auth/api-keys` — list current user's API keys (without raw values).
-- Login and refresh endpoints are the only public endpoints (besides `/health`).
+- Login endpoint is the only public endpoint (besides `/health`).
 
 ---
 
@@ -1111,8 +1096,7 @@ const envSchema = z.object({
   PORT: z.coerce.number().int().default(3000),
   DATABASE_URL: z.string().url(),
   JWT_SECRET: z.string().min(32),
-  JWT_EXPIRES_IN: z.string().default('15m'),
-  REFRESH_TOKEN_EXPIRES_IN_DAYS: z.coerce.number().int().default(30),
+  JWT_EXPIRES_IN: z.string().default('24h'),
   API_KEY_SALT_ROUNDS: z.coerce.number().int().default(12),
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
   CORS_ORIGIN: z.string().default('http://localhost:3000'),
@@ -1128,8 +1112,7 @@ NODE_ENV=development
 PORT=3000
 DATABASE_URL=postgresql://ffm:password@localhost:5432/feature_flags
 JWT_SECRET=change-me-to-at-least-32-characters
-JWT_EXPIRES_IN=15m
-REFRESH_TOKEN_EXPIRES_IN_DAYS=30
+JWT_EXPIRES_IN=24h
 API_KEY_SALT_ROUNDS=12
 LOG_LEVEL=info
 CORS_ORIGIN=http://localhost:3000
@@ -1419,7 +1402,7 @@ CMD ["node", "dist/index.js"]
 | Concern | Mitigation |
 |---|---|
 | **SQL Injection** | Prisma parameterizes all queries. No raw SQL for user input. |
-| **Authentication bypass** | All endpoints require JWT, API key, or valid refresh token (except `/health`, `/api/auth/login`, `/api/auth/refresh`). |
+| **Authentication bypass** | All endpoints require JWT or API key (except `/health` and `/api/auth/login`). |
 | **Role escalation** | RBAC middleware on every route. Services also check roles as defense-in-depth. |
 | **Secrets in code** | `.env` gitignored. JWT secret loaded from environment. No hardcoded secrets. |
 | **Audit log tampering** | Audit table has no `UPDATE` or `DELETE` permissions for the app user. |
@@ -1542,11 +1525,7 @@ GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO ffm_migrate;
 3. CLI reads JWT from ~/.config/ffm/token
 4. CLI sends PUT /api/customers/{id}/features/{featureId} with Authorization header
 5. API processes request (steps 1-13 above)
-6. If API responds 401:
-   a. CLI reads refresh token from ~/.config/ffm/refresh-token
-   b. CLI sends POST /api/auth/refresh with refreshToken
-   c. On success: stores new accessToken + refreshToken, retries step 4
-   d. On failure: prints "Session expired. Run `ffm login` to re-authenticate." and exits 1
+6. If API responds 401: prints "Session expired. Run `ffm login` to re-authenticate." and exits 1
 7. CLI receives JSON response
 8. CLI formats output as table/json/csv based on --format flag
 9. CLI prints result to stdout

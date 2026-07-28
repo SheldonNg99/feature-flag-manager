@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { z } from 'zod';
 
 const envSchema = z.object({
@@ -6,8 +6,7 @@ const envSchema = z.object({
   PORT: z.coerce.number().int().default(3000),
   DATABASE_URL: z.string().url(),
   JWT_SECRET: z.string().min(32),
-  JWT_EXPIRES_IN: z.string().default('15m'),
-  REFRESH_TOKEN_EXPIRES_IN_DAYS: z.coerce.number().int().default(30),
+  JWT_EXPIRES_IN: z.string().default('24h'),
   API_KEY_SALT_ROUNDS: z.coerce.number().int().default(12),
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
   CORS_ORIGIN: z.string().default('http://localhost:3000'),
@@ -51,8 +50,7 @@ describe('Environment validation', () => {
     if (result.success) {
       expect(result.data.NODE_ENV).toBe('development');
       expect(result.data.PORT).toBe(3000);
-      expect(result.data.JWT_EXPIRES_IN).toBe('15m');
-      expect(result.data.REFRESH_TOKEN_EXPIRES_IN_DAYS).toBe(30);
+      expect(result.data.JWT_EXPIRES_IN).toBe('24h');
       expect(result.data.API_KEY_SALT_ROUNDS).toBe(12);
       expect(result.data.LOG_LEVEL).toBe('info');
       expect(result.data.CORS_ORIGIN).toBe('http://localhost:3000');

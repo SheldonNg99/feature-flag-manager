@@ -1,0 +1,30 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ffm
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: feature_flags
+    ports:
+      - '5432:5432'
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    ports:
+      - '3000:3000'
+    environment:
+      DATABASE_URL: postgresql://ffm:password@db:5432/feature_flags
+      JWT_SECRET: development-secret-minimum-32-characters
+      NODE_ENV: development
+    depends_on:
+      - db
+    volumes:
+      - ../src:/app/src
+    command: pnpm dev
+
+volumes:
+  pgdata:
