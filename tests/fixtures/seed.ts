@@ -9,11 +9,12 @@ function uniq(prefix: string): string {
 
 export async function createTestUser(
   prisma: PrismaClient,
-  overrides: { email?: string; name?: string; role?: Role } = {},
+  overrides: { email?: string; name?: string; role?: Role; passwordHash?: string } = {},
 ) {
   return prisma.user.create({
     data: {
       email: overrides.email ?? uniq('user') + '@test.example.com',
+      passwordHash: overrides.passwordHash ?? 'placeholder-hash',
       name: overrides.name ?? uniq('User'),
       role: overrides.role ?? Role.VIEWER,
     },

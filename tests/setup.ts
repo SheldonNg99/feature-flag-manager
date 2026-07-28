@@ -1,1 +1,3 @@
-// Test setup — runs before each test file
+import { loadEnv } from '../src/config/env.js';
+
+loadEnv();
